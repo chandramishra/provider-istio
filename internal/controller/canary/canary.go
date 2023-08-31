@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Crossplane Authors.
+Copyright 2022 The Crossplane Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,16 +14,23 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package mytype
+package canary
 
 import (
 	"context"
 	"fmt"
+	"log"
+	"encoding/json"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/clientcmd"
+	versionedclient "istio.io/client-go/pkg/clientset/versioned"
+	"istio.io/client-go/pkg/apis/networking/v1alpha3"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	//"github.com/crossplane/provider-istio/internal/clients"
 
 	"github.com/crossplane/crossplane-runtime/pkg/connection"
 	"github.com/crossplane/crossplane-runtime/pkg/controller"
@@ -32,13 +39,14 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
 
-	"github.com/crossplane/provider-template/apis/sample/v1alpha1"
-	apisv1alpha1 "github.com/crossplane/provider-template/apis/v1alpha1"
-	"github.com/crossplane/provider-template/internal/features"
+	"github.com/crossplane/provider-istio/apis/simplified/v1alpha1"
+	apisv1alpha1 "github.com/crossplane/provider-istio/apis/v1alpha1"
+	//"github.com/crossplane/provider-istio/internal/controller/features"
+	"github.com/crossplane/provider-istio/internal/features"
 )
 
 const (
-	errNotMyType    = "managed resource is not a MyType custom resource"
+	errNotCanary    = "managed resource is not a Canary custom resource"
 	errTrackPCUsage = "cannot track ProviderConfig usage"
 	errGetPC        = "cannot get ProviderConfig"
 	errGetCreds     = "cannot get credentials"
@@ -46,44 +54,51 @@ const (
 	errNewClient = "cannot create new Service"
 )
 
-// A NoOpService does nothing.
-type NoOpService struct{}
+type IstioService struct{
+  istioObj *versionedclient.Clientset
+}
 
 var (
-	newNoOpService = func(_ []byte) (interface{}, error) { return &NoOpService{}, nil }
+	newIstioService = func() (*IstioService, error) { 
+		kubeconfig := "/root/.kube/config"
+		restConfig, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			log.Fatalf("Failed to create k8s rest client: %s", err)
+		}
+
+		ic, err := versionedclient.NewForConfig(restConfig)
+		if err != nil {
+			log.Fatalf("Failed to create istio client: %s", err)
+		}
+		return &IstioService{istioObj: ic}, nil 
+		}
 )
 
-// Setup adds a controller that reconciles MyType managed resources.
+// Setup adds a controller that reconciles Canary managed resources.
 func Setup(mgr ctrl.Manager, o controller.Options) error {
-	name := managed.ControllerName(v1alpha1.MyTypeGroupKind)
+	name := managed.ControllerName(v1alpha1.CanaryGroupKind)
 
 	cps := []managed.ConnectionPublisher{managed.NewAPISecretPublisher(mgr.GetClient(), mgr.GetScheme())}
 	if o.Features.Enabled(features.EnableAlphaExternalSecretStores) {
 		cps = append(cps, connection.NewDetailsManager(mgr.GetClient(), apisv1alpha1.StoreConfigGroupVersionKind))
 	}
 
-	opts := []managed.ReconcilerOption{
+	r := managed.NewReconciler(mgr,
+		resource.ManagedKind(v1alpha1.CanaryGroupVersionKind),
 		managed.WithExternalConnecter(&connector{
 			kube:         mgr.GetClient(),
 			usage:        resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
-			newServiceFn: newNoOpService}),
+			newServiceFn: newIstioService}),
 		managed.WithLogger(o.Logger.WithValues("controller", name)),
 		managed.WithPollInterval(o.PollInterval),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
-		managed.WithConnectionPublishers(cps...),
-	}
-
-	if o.Features.Enabled(features.EnableAlphaManagementPolicies) {
-		opts = append(opts, managed.WithManagementPolicies())
-	}
-
-	r := managed.NewReconciler(mgr, resource.ManagedKind(v1alpha1.MyTypeGroupVersionKind), opts...)
+		managed.WithConnectionPublishers(cps...))
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		WithOptions(o.ForControllerRuntime()).
 		WithEventFilter(resource.DesiredStateChanged()).
-		For(&v1alpha1.MyType{}).
+		For(&v1alpha1.Canary{}).
 		Complete(ratelimiter.NewReconciler(name, r, o.GlobalRateLimiter))
 }
 
@@ -92,7 +107,7 @@ func Setup(mgr ctrl.Manager, o controller.Options) error {
 type connector struct {
 	kube         client.Client
 	usage        resource.Tracker
-	newServiceFn func(creds []byte) (interface{}, error)
+	newServiceFn func() (*IstioService, error)
 }
 
 // Connect typically produces an ExternalClient by:
@@ -101,9 +116,9 @@ type connector struct {
 // 3. Getting the credentials specified by the ProviderConfig.
 // 4. Using the credentials to form a client.
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.Canary)
 	if !ok {
-		return nil, errors.New(errNotMyType)
+		return nil, errors.New(errNotCanary)
 	}
 
 	if err := c.usage.Track(ctx, mg); err != nil {
@@ -115,13 +130,14 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		return nil, errors.Wrap(err, errGetPC)
 	}
 
-	cd := pc.Spec.Credentials
-	data, err := resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
-	if err != nil {
-		return nil, errors.Wrap(err, errGetCreds)
-	}
+	//cd := pc.Spec.Credentials
+	//data, err := resource.CommonCredentialExtractor(ctx, cd.Source, c.kube, cd.CommonCredentialSelectors)
+	//if err != nil {
+	//	return nil, errors.Wrap(err, errGetCreds)
+	//}
+	//}
 
-	svc, err := c.newServiceFn(data)
+	svc, err := c.newServiceFn()
 	if err != nil {
 		return nil, errors.Wrap(err, errNewClient)
 	}
@@ -134,17 +150,20 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 type external struct {
 	// A 'client' used to connect to the external resource API. In practice this
 	// would be something like an AWS SDK client.
-	service interface{}
+	service *IstioService
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.Canary)
 	if !ok {
-		return managed.ExternalObservation{}, errors.New(errNotMyType)
+		return managed.ExternalObservation{}, errors.New(errNotCanary)
 	}
 
 	// These fmt statements should be removed in the real implementation.
 	fmt.Printf("Observing: %+v", cr)
+	if true {
+		return managed.ExternalObservation{ResourceExists: false}, nil
+	}
 
 	return managed.ExternalObservation{
 		// Return false when the external resource does not exist. This lets
@@ -164,12 +183,22 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.Canary)
 	if !ok {
-		return managed.ExternalCreation{}, errors.New(errNotMyType)
+		return managed.ExternalCreation{}, errors.New(errNotCanary)
 	}
 
+        fmt.Println("******************Managed resource Manifest ************************************")
 	fmt.Printf("Creating: %+v", cr)
+        fmt.Println("******************Creating Resource ************************************")
+	data := "{\"apiVersion\": \"networking.istio.io/v1alpha3\",\"kind\": \"VirtualService\",\"metadata\": {\"name\": \"helloworld\"},\"spec\": {\"hosts\": [\"podinfo-service\"],\"http\": [{\"route\": [{\"destination\": {\"host\": \"podinfo-service\",\"subset\": \"v1\"},\"weight\": 20},{\"destination\": {\"host\": \"podinfo-service\",\"subset\": \"v2\"},\"weight\": 80}]}]}}"
+	bytes := []byte(data)
+	virtualService := &v1alpha3.VirtualService{}
+	json.Unmarshal(bytes, &virtualService)
+	c.service.istioObj.NetworkingV1alpha3().VirtualServices("test").Create(context.TODO(), virtualService, metav1.CreateOptions{})
+	vsList, err := c.service.istioObj.NetworkingV1alpha3().VirtualServices("test").List(context.TODO(), metav1.ListOptions{})
+        fmt.Println(vsList)
+        fmt.Println(err)
 
 	return managed.ExternalCreation{
 		// Optionally return any details that may be required to connect to the
@@ -179,9 +208,9 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 }
 
 func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.Canary)
 	if !ok {
-		return managed.ExternalUpdate{}, errors.New(errNotMyType)
+		return managed.ExternalUpdate{}, errors.New(errNotCanary)
 	}
 
 	fmt.Printf("Updating: %+v", cr)
@@ -194,9 +223,9 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 }
 
 func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.Canary)
 	if !ok {
-		return errors.New(errNotMyType)
+		return errors.New(errNotCanary)
 	}
 
 	fmt.Printf("Deleting: %+v", cr)

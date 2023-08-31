@@ -5,18 +5,18 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.11.3
   creationTimestamp: null
-  name: mytypes.sample.template.crossplane.io
+  name: canaries.simplified.istio.crossplane.io
 spec:
-  group: sample.template.crossplane.io
+  group: simplified.istio.crossplane.io
   names:
     categories:
     - crossplane
     - managed
-    - template
-    kind: MyType
-    listKind: MyTypeList
-    plural: mytypes
-    singular: mytype
+    - istio
+    kind: Canary
+    listKind: CanaryList
+    plural: canaries
+    singular: canary
   scope: Cluster
   versions:
   - additionalPrinterColumns:
@@ -35,7 +35,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: A MyType is an example API type.
+        description: A Canary is an example API type.
         properties:
           apiVersion:
             description: 'APIVersion defines the versioned schema of this representation
@@ -50,7 +50,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: A MyTypeSpec defines the desired state of a MyType.
+            description: A CanarySpec defines the desired state of a Canary.
             properties:
               deletionPolicy:
                 default: Delete
@@ -66,12 +66,34 @@ spec:
                 - Delete
                 type: string
               forProvider:
-                description: MyTypeParameters are the configurable fields of a MyType.
                 properties:
-                  configurableField:
-                    type: string
+                  sources:
+                    items:
+                      type: string
+                    type: array
+                  split:
+                    items:
+                      properties:
+                        destination:
+                          properties:
+                            service:
+                              type: string
+                            version:
+                              type: string
+                          required:
+                          - service
+                          - version
+                          type: object
+                        weight:
+                          type: integer
+                      required:
+                      - destination
+                      - weight
+                      type: object
+                    type: array
                 required:
-                - configurableField
+                - sources
+                - split
                 type: object
               managementPolicy:
                 default: FullControl
@@ -260,17 +282,18 @@ spec:
             - forProvider
             type: object
           status:
-            description: A MyTypeStatus represents the observed state of a MyType.
+            description: A CanaryStatus represents the observed state of a Canary.
             properties:
               atProvider:
-                description: MyTypeObservation are the observable fields of a MyType.
+                description: "type CanaryParameters struct { Sources []string `json:\"sources\"`
+                  Conf    struct { Split []struct { Weight      int `json:\"weight\"`
+                  Destination struct { Service string `json:\"service\"` Version string
+                  `json:\"version\"` } `json:\"destination\"` } `json:\"split\"` }
+                  `json:\"conf\"` } \n CanaryObservation are the observable fields
+                  of a Canary."
                 properties:
-                  configurableField:
-                    type: string
                   observableField:
                     type: string
-                required:
-                - configurableField
                 type: object
               conditions:
                 description: Conditions of the resource.
